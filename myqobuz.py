@@ -17,24 +17,31 @@ Note: playlists are supposed to have no duplicated track
 import sys
 import os
 import logging
+import time
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from datetime import datetime, timedelta
 import json
 import re
 import requests
 
+# Pre-parse --config before full argument parsing
+_config_file = 'config.json'
+if '--config' in sys.argv:
+    _idx = sys.argv.index('--config')
+    if _idx + 1 < len(sys.argv):
+        _config_file = sys.argv[_idx + 1]
+
 # read config file for login and preferences
 try:
-    with open('config.json', encoding='utf8') as fconf:
+    with open(_config_file, encoding='utf8') as fconf:
         MYCONFIG = json.load(fconf)
 except FileNotFoundError:
-    sys.exit('FAILED to load config file')
+    sys.exit(f'FAILED to load config file: {_config_file}')
 try:
     if MYCONFIG['login']['app_id'] == "<MY_APP_ID>" or \
         MYCONFIG['login']['app_secret'] == "<MY_APP_SECRET>" or \
         MYCONFIG['login']['email'] == "<MY_EMAIL>" or \
-        MYCONFIG['login']['password'] == "<MY_PASSWORD>" or \
-        MYCONFIG['qobuz_module'] == "<PYTHON_QOBUZ_MODULE_PATH>":
+        MYCONFIG['login']['password'] == "<MY_PASSWORD>":
         sys.exit("FAILED : config.json file not set")
 except KeyError as _e:
     sys.exit("FAILED : missing entries in config.json")
@@ -492,10 +499,10 @@ def qobuz_mod_favorites(user, action, args, log):
     #
     if args.fav_file:
         try:
-            fsource = open(args.fav_file[0], encoding='utf8')
-            log.info('Favorites %s from "%s"', action, args.fav_file[0])
+            fsource = open(args.fav_file, encoding='utf8')
+            log.info('Favorites %s from "%s"', action, args.fav_file)
         except FileNotFoundError:
-            print(f'FAILED: file "{args.fav_file[0]}" not found')
+            print(f'FAILED: file "{args.fav_file}" not found')
             return
     else:
         fsource = sys.stdin
@@ -523,15 +530,36 @@ def qobuz_mod_favorites(user, action, args, log):
             favorites[section].append(match.group(1))
     log.info('Favorites to %s : %s', action, favorites)
 
-    result = False
-    if action == 'add':
-        result = user.favorites_add(albums=favorites['Albums'], tracks=favorites['Tracks'], artists=favorites['Artists'])
-    elif action == 'del':
-        result = user.favorites_del(albums=favorites['Albums'], tracks=favorites['Tracks'], artists=favorites['Artists'])
-    if result:
-        print(f"  Favorites processed : Artists:{len(favorites['Artists'])}, Albums:{len(favorites['Albums'])}, Tracks:{len(favorites['Tracks'])}")
-    else:
-        print('FAILED')
+    # Process each type individually with progress display and rate limiting
+    success = 0
+    failed = 0
+
+    def process_items(items, label, add_kwargs_key):
+        nonlocal success, failed
+        total = len(items)
+        if total == 0:
+            return
+        for i, item_id in enumerate(items, 1):
+            print(f'  {label}: {i}/{total} ({item_id})', end='\r', flush=True)
+            if action == 'add':
+                result = user.favorites_add(**{add_kwargs_key: [item_id]})
+            elif action == 'del':
+                result = user.favorites_del(**{add_kwargs_key: [item_id]})
+            else:
+                result = False
+            if result:
+                success += 1
+            else:
+                failed += 1
+            time.sleep(0.2)
+        print()
+
+    process_items(favorites['Albums'], 'Albums', 'albums')
+    process_items(favorites['Tracks'], 'Tracks', 'tracks')
+    process_items(favorites['Artists'], 'Artists', 'artists')
+
+    total = success + failed
+    print(f'  Done: {success}/{total} succeeded' + (f', {failed} failed' if failed else ''))
 
 
 
@@ -545,6 +573,7 @@ def main():
     parser = ArgumentParser(description='Various commands around Qobuz catalog',\
                                      formatter_class=RawDescriptionHelpFormatter)
     parser.add_argument('--log', help='log on file')
+    parser.add_argument('--config', default='config.json', help='path to config file (default: config.json)')
 
     # create subparsers
     subparsers = parser.add_subparsers(help=': availables commands', dest='command')
